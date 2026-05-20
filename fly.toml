@@ -1,0 +1,34 @@
+# Fly.io config for kombocode-qualifier (Telegram polling bot, no public ingress).
+# Generated for Phase 1 — not yet deployed.
+#
+# Before first deploy:
+#   fly apps create kombocode-qualifier
+#   fly volumes create kombocode_qualifier_data --region iad --size 1
+#   fly secrets set TELEGRAM_BOT_TOKEN=... ANTHROPIC_API_KEY=... ACCESS_CODE=...
+#   fly deploy
+
+app = "kombocode-qualifier"
+primary_region = "iad"
+kill_signal = "SIGINT"
+kill_timeout = "10s"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  LOG_LEVEL = "info"
+  DB_PATH = "/data/qualifier.db"
+
+[[mounts]]
+  source = "kombocode_qualifier_data"
+  destination = "/data"
+
+# Polling-mode bot: no HTTP service, no public ingress.
+# Single instance only (concurrent pollers would conflict on Telegram updates).
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+  cpus = 1
+
+[deploy]
+  strategy = "immediate"

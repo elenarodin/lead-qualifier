@@ -1,0 +1,387 @@
+# Kombocode Lead Qualifier Rubric
+# Source of truth for ICP. Edited by Lena. Consumed by both the code (qualifier service)
+# and Claude (via SKILL.md). When ICP changes, this is the only file that changes.
+
+version: 1
+last_updated: 2026-05-19
+owner: lena
+
+# ---------------------------------------------------------------------------
+# Geography
+# ---------------------------------------------------------------------------
+geography:
+  allowed:
+    - US
+  notes: "US only for now. Buyer's profile location must be US — do not fall back to company HQ if person is based elsewhere."
+
+# ---------------------------------------------------------------------------
+# Company size (employee count)
+# ---------------------------------------------------------------------------
+company_size:
+  min_employees: 40
+  max_employees: 1000
+  ideal_band: [80, 300]   # sweet spot — flag in signals when within
+  notes: "40-1000 is Ross-brief range. 80-300 is the historical sweet spot — leads in this band get a 'size_sweet_spot' signal."
+
+# ---------------------------------------------------------------------------
+# Industries
+# ---------------------------------------------------------------------------
+industries:
+  # Primary targets — full outbound. Two co-primary families: payer/managed-care
+  # and pharma/biotech. As of 1.5, pharma is no longer existing_only.
+  core:
+    # ---- Payer / managed-care family ----
+    - id: payer_tech
+      label: "Payer Tech"
+      description: "Companies building technology for health insurance payers — claims, prior auth, utilization mgmt, denials, appeals."
+      examples: ["Cohere Health", "Olive AI (defunct, illustrative)", "Surest", "Garner Health"]
+
+    - id: care_management_saas
+      label: "Care Management SaaS"
+      description: "Platforms for care coordination, care plan execution, member engagement, population health."
+      examples: ["Welkin Health", "Wellth", "Vida Health", "Cricket Health"]
+
+    # ---- Pharma / biotech family (co-primary as of 1.5) ----
+    - id: pharma_biotech
+      label: "Pharma / Biotech"
+      description: "Pharma and biotech companies themselves — digital, IT, and R&D platform tech inside drug developers."
+      examples: ["Pfizer", "Moderna", "AstraZeneca", "Sanofi", "Genentech", "Bristol Myers Squibb"]
+
+    - id: clinical_trial_tech
+      label: "Clinical Trial Tech"
+      description: "Clinical trial platforms, eClinical, trial-operations tech, decentralized trial tooling."
+      examples: ["Medidata", "Veeva Vault Clinical", "Saama", "Florence Healthcare", "Science 37"]
+
+    - id: clinical_ai_precision_medicine
+      label: "Clinical AI / Precision Medicine"
+      description: "Pharmacogenomics, AI-assisted prescribing, precision medicine, AI diagnostics product companies."
+      examples: ["Tempus", "GeneDx", "Owkin", "PathAI", "Paige"]
+
+    - id: pharma_regulatory_tech
+      label: "Pharma Regulatory / Quality Tech"
+      description: "Regulatory, compliance, quality, GxP tech for pharma — submissions, validation, eQMS."
+      examples: ["Veeva", "MasterControl", "Sparta Systems", "ArisGlobal"]
+
+  # Secondary targets — full outbound, validated angles
+  expanded:
+    - id: health_it_infrastructure
+      label: "Health IT Infrastructure"
+      description: "Core clinical and admin systems — EHR vendors and the ecosystem that integrates with them."
+      examples: ["Epic", "Cerner (Oracle Health)", "Allscripts (Veradigm)", "athenahealth", "Redox", "Particle Health"]
+
+    - id: pbm_tech
+      label: "PBM / Pharmacy Benefit Tech"
+      description: "Pharmacy benefit managers and the tech stack around drug benefits, formulary, claims."
+      examples: ["Caremark", "Express Scripts", "OptumRx", "CVS Caremark", "Capital Rx"]
+
+    - id: payer_plan_tech
+      label: "Payer Plan Tech"
+      description: "Health plans themselves — their internal tech and AI teams. Bigger than vendors but tech leaders inside are valid ICP."
+      examples: ["UnitedHealth Group / Optum", "Anthem (Elevance)", "Humana", "Blue Cross Blue Shield (regional)", "Centene", "Molina"]
+
+    - id: health_data_platform
+      label: "Health Data Platform"
+      description: "Companies that aggregate and normalize health data — claims, clinical, RWD, RWE."
+      examples: ["Datavant", "Komodo Health", "Health Catalyst", "Truveta", "Trilliant Health"]
+
+  # Hard reject — outside healthcare or completely off-ICP
+  excluded:
+    - id: consumer_health_dtc
+      label: "Consumer Health / D2C"
+      description: "Telehealth-to-consumer, wellness apps without payer/plan side. Different buyer, different cycle."
+      examples: ["Hims", "Ro", "Noom"]
+    - id: provider_only
+      label: "Pure Provider / Hospital System"
+      description: "Hospital systems with no tech product. Buyer here is CIO, very different cycle."
+    - id: non_healthcare
+      label: "Non-Healthcare"
+      description: "Anything outside healthcare/health tech."
+
+# ---------------------------------------------------------------------------
+# Titles
+# ---------------------------------------------------------------------------
+titles:
+  accept:
+    # C-level technical
+    - CTO
+    - Chief Technology Officer
+    - Chief Product Officer
+    - Chief Product and Technology Officer
+    - Chief Data Officer
+    - Chief AI Officer
+    - CDO
+    - CIO  # only for product companies, not pure providers
+    # Co-founders with technical signal
+    - "Co-Founder, CTO"
+    - "Co-Founder & CTO"
+    - "Co-Founder CTO"
+    - "Founder, CTO"
+    # VP level — Ross brief expansion
+    - VP Engineering
+    - VP of Engineering
+    - VP Product
+    - VP of Product
+    - VP Operations
+    - VP of Operations
+    - VP Data
+    - VP of Data
+    - VP AI
+    - VP of AI
+    - VP Platform
+    - VP of Platform
+    # Head of
+    - Head of Engineering
+    - Head of Platform
+    - Head of Product
+    - Head of AI
+    - Head of Data
+    - Head of Architecture
+    # Director — only for larger orgs (250+)
+    - Director of Engineering
+    - Director of Platform
+    - Director of AI
+
+  reject:
+    - Software Engineer
+    - Senior Software Engineer
+    - Staff Engineer
+    - Principal Engineer
+    - Engineering Manager   # too tactical
+    - Recruiter
+    - HR
+    - Sales
+    - Marketing
+    - Customer Success
+    - Account Executive
+    - Intern
+    - Consultant         # too ambiguous unless context proves otherwise
+    - Advisor            # advisory only, not buying decision
+
+  notes: "CEO without CTO at smaller companies (<150) can be accept if technical background is clear. Director-level is accept only at 250+ employee orgs — at smaller companies they're too tactical."
+
+# ---------------------------------------------------------------------------
+# Segments — what gets stamped in the Notes column and routes opening angle
+# ---------------------------------------------------------------------------
+segments:
+  - id: payer_tech_cto
+    label: "Payer Tech CTO"
+    criteria:
+      industry: payer_tech
+      title_includes: [CTO, "Co-Founder CTO", "VP Engineering", "Head of Engineering", "Head of Platform"]
+    default_angles: [trace_any_denial, cms_0057_scorecard, production_stabilization]
+
+  - id: care_management_cto
+    label: "Care Management SaaS CTO"
+    criteria:
+      industry: care_management_saas
+      title_includes: [CTO, "Co-Founder CTO", "VP Engineering", "Head of Engineering", "VP Product"]
+    default_angles: [production_stabilization, architect_and_build]
+
+  - id: health_it_infra_cto
+    label: "Health IT Infrastructure CTO"
+    criteria:
+      industry: health_it_infrastructure
+      title_includes: [CTO, "VP Engineering", "Head of Platform", "VP Platform"]
+    default_angles: [architect_and_build, production_stabilization]
+
+  - id: pbm_tech_leader
+    label: "PBM Tech Leader"
+    criteria:
+      industry: pbm_tech
+      title_includes: [CTO, "VP Engineering", "Head of AI", "VP Data"]
+    default_angles: [trace_any_denial, production_stabilization]
+
+  - id: payer_plan_tech
+    label: "Payer Plan Tech Leader"
+    criteria:
+      industry: payer_plan_tech
+      title_includes: [CTO, "VP Engineering", "Head of Architecture", "Head of AI", "VP AI"]
+    default_angles: [architect_and_build, cms_0057_scorecard]
+    notes: "Gopinath (Elevance) lives in this segment but is already pipeline — exclude from cold outreach."
+
+  - id: health_data_platform_cdo
+    label: "Health Data Platform CDO/CTO"
+    criteria:
+      industry: health_data_platform
+      title_includes: [CTO, "Chief Data Officer", CDO, "VP Data", "Head of Data"]
+    default_angles: [architect_and_build, production_stabilization]
+
+  # ---- Pharma / biotech segments (co-primary as of 1.5) ----
+
+  - id: pharma_tech_cto
+    label: "Pharma/Biotech Tech CTO"
+    criteria:
+      industry: pharma_biotech
+      title_includes: [CTO, "Chief Technology Officer", "Co-Founder CTO", "VP Engineering", "VP of Engineering", "Head of Engineering", "Head of Platform", "VP Platform", "VP of Platform"]
+    default_angles: [production_stabilization, architect_and_build]
+
+  - id: clinical_trial_tech
+    label: "Clinical Trial Tech"
+    criteria:
+      industry: clinical_trial_tech
+      title_includes: [CTO, "VP Engineering", "VP of Engineering", "Head of Engineering", "Head of Platform", "VP Product", "VP of Product"]
+    default_angles: [production_stabilization, architect_and_build]
+
+  - id: pharma_ai_data
+    label: "Pharma AI/Data Leader"
+    criteria:
+      industry: pharma_biotech
+      title_includes: ["Chief Data Officer", CDO, "Chief AI Officer", "Head of AI", "Head of Data", "VP Data", "VP of Data", "VP AI", "VP of AI", "Head of ML"]
+    default_angles: [architect_and_build, production_stabilization]
+
+  - id: clinical_ai_precision_medicine
+    label: "Clinical AI / Precision Medicine"
+    criteria:
+      industry: clinical_ai_precision_medicine
+      title_includes: [CTO, "Chief Technology Officer", "Chief Data Officer", CDO, "Head of AI", "VP AI", "VP of AI", "VP Engineering", "Head of ML"]
+    default_angles: [production_stabilization, architect_and_build, eugene_partnership]
+
+  - id: pharma_regulatory_tech
+    label: "Pharma Regulatory / Quality Tech"
+    criteria:
+      industry: pharma_regulatory_tech
+      title_includes: [CTO, "VP Engineering", "Head of Platform", "Head of Architecture", "VP Platform", "VP of Platform"]
+    default_angles: [architect_and_build, production_stabilization]
+
+# ---------------------------------------------------------------------------
+# Opening angles — Kombocode's offers, mapped to segments
+# ---------------------------------------------------------------------------
+opening_angles:
+  - id: trace_any_denial
+    label: "Trace-Any-Denial Diagnostic"
+    description: "Self-administered diagnostic — buyer answers stack questions, gets named failure pattern back. Primary MMP."
+    best_for: [payer_tech_cto, pbm_tech_leader]
+    signals_that_strengthen:
+      - "Active prior auth or denials work"
+      - "Recent posts on claims AI precision or UR workflows"
+      - "CMS-0057 prep mentions"
+      - "Hiring claims/denials engineers"
+
+  - id: cms_0057_scorecard
+    label: "CMS-0057 Scorecard"
+    description: "Self-administered scorecard for CMS-0057 compliance — 4 API requirements, Da Vinci FHIR profiles, January 2027 deadlines."
+    best_for: [payer_tech_cto, payer_plan_tech]
+    signals_that_strengthen:
+      - "Recent CMS-0057, interoperability, or FHIR mentions"
+      - "Compliance or regulatory exposure language"
+      - "Working with Da Vinci profiles"
+
+  - id: production_stabilization
+    label: "Production Stabilization Retainer"
+    description: "Fixed retainer for fragile AI systems in production — focus on cost, reliability, audit-readiness."
+    best_for: [care_management_cto, health_it_infra_cto, payer_tech_cto, health_data_platform_cdo]
+    signals_that_strengthen:
+      - "Public posts about AI cost blowouts, latency, hallucinations"
+      - "Hiring SRE/platform engineers"
+      - "Recent funding round (cost pressure)"
+      - "Mentions of compliance audits"
+
+  - id: architect_and_build
+    label: "Architect-and-Build Engagement"
+    description: "Greenfield architecture + build for AI-enabled features. Multi-month engagement."
+    best_for: [health_it_infra_cto, health_data_platform_cdo, payer_plan_tech, care_management_cto]
+    signals_that_strengthen:
+      - "Recently raised round explicitly for AI build"
+      - "Posts about strategy gaps in AI roadmap"
+      - "New-CTO position (under 6 months)"
+      - "Hiring AI/platform team from zero"
+
+  - id: eugene_partnership
+    label: "Behavioral Trust Audit (Eugene Chan)"
+    description: "Joint offering — Eugene runs behavioral trust audit, Kombocode handles engineering remediation. For orgs with known trust/adoption issues in AI tools."
+    best_for: [care_management_cto, payer_tech_cto, health_it_infra_cto]
+    signals_that_strengthen:
+      - "Public mention of AI rollout struggles"
+      - "Compliance + clinician adoption tension"
+      - "Posts about responsible AI in clinical contexts"
+    notes: "Use sparingly in v1 — only when the trust audit angle is genuinely the right fit. Default to trace_any_denial or production_stabilization."
+
+# ---------------------------------------------------------------------------
+# Tiers — scoring
+# ---------------------------------------------------------------------------
+tiers:
+  HOT:
+    description: "Perfect ICP + at least one strong signal. Reach this week."
+    requires:
+      - "Passes all hard rules"
+      - "Clean segment match"
+      - "At least one strong_signal present"
+    strong_signals:
+      - "Recent (last 90 days) post on denials, prior auth, claims AI, or audit readiness"
+      - "Active job posting for AI/platform/eng leadership"
+      - "Engaged with Lena's content (liked, commented, reposted)"
+      - "Mentioned in a Larry Trotter or industry post about HIPAA/governance"
+      - "Recently announced funding with stated AI build plans"
+      - "Company size in ideal_band (80-300)"
+      - "Public post mentioning a Kombocode-relevant deadline (CMS-0057, HEDIS, AEP)"
+      # Pharma / biotech signals (1.5)
+      - "Recent post on clinical-trial AI, drug-discovery ML, GxP validation, or FDA submission tooling"
+      - "Hiring AI or platform leadership in a pharma/biotech context"
+      - "Public discussion of precision medicine, pharmacogenomics, or AI-assisted prescribing"
+
+  WARM:
+    description: "Perfect ICP, no specific signal. One thoughtful touch — not a sequence."
+    requires:
+      - "Passes all hard rules"
+      - "Clean segment match"
+      - "No strong signals present"
+
+  COLD:
+    description: "Borderline — one ICP attribute weak or ambiguous. REVIEW manually."
+    requires:
+      - "Passes hard rules"
+      - "Segment match is uncertain OR title is borderline OR signals are stale"
+
+  DISQUALIFIED:
+    description: "Hard rule violation. FAIL. Do not reach out."
+
+# ---------------------------------------------------------------------------
+# Disqualifiers — hard, deterministic, no LLM
+# ---------------------------------------------------------------------------
+disqualifiers:
+  - id: outside_us
+    rule: "geography != US"
+    severity: hard
+    message_template: "Profile location is {location}, not US"
+
+  - id: company_too_small
+    rule: "company_size < min_employees"
+    severity: hard
+    message_template: "Company size {size} below min {min}"
+
+  - id: company_too_large
+    rule: "company_size > max_employees"
+    severity: hard
+    message_template: "Company size {size} exceeds max {max}"
+
+  - id: industry_excluded
+    rule: "industry in excluded"
+    severity: hard
+    message_template: "Industry {industry} is in excluded list"
+
+  - id: title_rejected
+    rule: "title matches reject list"
+    severity: hard
+    message_template: "Title '{title}' is too junior or not a decision-maker"
+
+  - id: title_below_threshold_for_size
+    rule: "title is Director-level AND company_size < 250"
+    severity: hard
+    message_template: "Director-level title at sub-250 company — too tactical for our buyer"
+
+# ---------------------------------------------------------------------------
+# Excluded contacts — already in pipeline, do not auto-qualify
+# ---------------------------------------------------------------------------
+excluded_contacts:
+  - name: "Gopinath"
+    company: "Elevance Health"
+    reason: "Active pipeline — architecture review track"
+  - name: "Larry Trotter II"
+    company: "Inherent Security"
+    reason: "Compliance collaborator — not outbound"
+  - name: "Eugene Chan"
+    company: "Behavieural"
+    reason: "Partnership development — not outbound"
+  - name: "Clinton Browning"
+    company: "Binarion"
+    reason: "Referral partner — not outbound"
