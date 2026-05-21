@@ -1,36 +1,104 @@
 import type Database from "better-sqlite3";
-import type { ProfileData, QualificationResult } from "../core/types.js";
+import type {
+  CompanyScreenResult,
+  CompanyStatus,
+  QualificationResult,
+  Tier,
+} from "../core/types.js";
+
+// ---------------------------------------------------------------------------
+// Insert
+// ---------------------------------------------------------------------------
 
 export interface InsertLeadInput {
+  type: "person" | "company";
   raw_text: string;
   linkedin_url: string | null;
-  profile: ProfileData;
-  result: QualificationResult;
+  name: string | null;
+  title: string | null;
+  company: string | null;
+  company_size: number | null;
+  result: QualificationResult | CompanyScreenResult;
   source: string;
   source_user_id: string;
 }
 
-export interface LeadSummary {
-  id: number;
-  name: string | null;
-  title: string | null;
-  company: string | null;
-  // Null when the lead is a NEEDS_INFO outcome (1.6) — we couldn't place a tier.
-  tier: string | null;
-  segment: string | null;
-  segment_label: string | null;
-  qualified_at: string;
+export function insertLead(
+  db: Database.Database,
+  input: InsertLeadInput,
+): number {
+  const stmt = db.prepare(`
+    INSERT INTO leads (
+      type, raw_text, linkedin_url, name, title, company, company_size,
+      qualified_at, result_json, source, source_user_id
+    ) VALUES (
+      @type, @raw_text, @linkedin_url, @name, @title, @company, @company_size,
+      @qualified_at, @result_json, @source, @source_user_id
+    )
+  `);
+  const info = stmt.run({
+    type: input.type,
+    raw_text: input.raw_text,
+    linkedin_url: input.linkedin_url,
+    name: input.name,
+    title: input.title,
+    company: input.company,
+    company_size: input.company_size,
+    qualified_at: new Date().toISOString(),
+    result_json: JSON.stringify(input.result),
+    source: input.source,
+    source_user_id: input.source_user_id,
+  });
+  return Number(info.lastInsertRowid);
 }
 
-export interface LeadFull extends LeadSummary {
+// ---------------------------------------------------------------------------
+// Read shapes — discriminated on `type` so callers can dispatch UI by lead kind.
+// ---------------------------------------------------------------------------
+
+export interface BaseLeadSummary {
+  id: number;
+  qualified_at: string;
+  company: string | null;
+}
+
+export interface PersonLeadSummary extends BaseLeadSummary {
+  type: "person";
+  name: string | null;
+  title: string | null;
+  tier: Tier | null;
+  segment: string | null;
+  segment_label: string | null;
+}
+
+export interface CompanyLeadSummary extends BaseLeadSummary {
+  type: "company";
+  status: CompanyStatus;
+  industry_family: string | null;
+  angle: string | null;
+  angle_label: string | null;
+}
+
+export type LeadSummary = PersonLeadSummary | CompanyLeadSummary;
+
+export interface PersonLeadFull extends PersonLeadSummary {
   raw_text: string;
   linkedin_url: string | null;
   company_size: number | null;
   result: QualificationResult;
 }
 
+export interface CompanyLeadFull extends CompanyLeadSummary {
+  raw_text: string;
+  company_size: number | null;
+  result: CompanyScreenResult;
+}
+
+export type LeadFull = PersonLeadFull | CompanyLeadFull;
+
 interface LeadRow {
   id: number;
+  type: string | null; // null for any pre-1.7 row that somehow lacks the column (defensive)
   raw_text: string;
   linkedin_url: string | null;
   name: string | null;
@@ -44,50 +112,68 @@ interface LeadRow {
 }
 
 function rowToFull(row: LeadRow): LeadFull {
+  if (row.type === "company") {
+    const result = JSON.parse(row.result_json) as CompanyScreenResult;
+    return {
+      type: "company",
+      id: row.id,
+      qualified_at: row.qualified_at,
+      company: row.company,
+      status: result.status,
+      industry_family: result.industry_family,
+      angle: result.angle,
+      angle_label: result.angle_label,
+      raw_text: row.raw_text,
+      company_size: row.company_size,
+      result,
+    };
+  }
   const result = JSON.parse(row.result_json) as QualificationResult;
   return {
+    type: "person",
     id: row.id,
+    qualified_at: row.qualified_at,
+    company: row.company,
     name: row.name,
     title: row.title,
-    company: row.company,
-    company_size: row.company_size,
     tier: result.tier,
     segment: result.segment,
     segment_label: result.segment_label,
-    qualified_at: row.qualified_at,
     raw_text: row.raw_text,
     linkedin_url: row.linkedin_url,
+    company_size: row.company_size,
     result,
   };
 }
 
-export function insertLead(
-  db: Database.Database,
-  input: InsertLeadInput,
-): number {
-  const stmt = db.prepare(`
-    INSERT INTO leads (
-      raw_text, linkedin_url, name, title, company, company_size,
-      qualified_at, result_json, source, source_user_id
-    ) VALUES (
-      @raw_text, @linkedin_url, @name, @title, @company, @company_size,
-      @qualified_at, @result_json, @source, @source_user_id
-    )
-  `);
-  const info = stmt.run({
-    raw_text: input.raw_text,
-    linkedin_url: input.linkedin_url,
-    name: input.profile.name,
-    title: input.profile.title,
-    company: input.profile.company,
-    company_size: input.profile.company_size,
-    qualified_at: new Date().toISOString(),
-    result_json: JSON.stringify(input.result),
-    source: input.source,
-    source_user_id: input.source_user_id,
-  });
-  return Number(info.lastInsertRowid);
+function fullToSummary(f: LeadFull): LeadSummary {
+  if (f.type === "company") {
+    return {
+      type: "company",
+      id: f.id,
+      qualified_at: f.qualified_at,
+      company: f.company,
+      status: f.status,
+      industry_family: f.industry_family,
+      angle: f.angle,
+      angle_label: f.angle_label,
+    };
+  }
+  return {
+    type: "person",
+    id: f.id,
+    qualified_at: f.qualified_at,
+    company: f.company,
+    name: f.name,
+    title: f.title,
+    tier: f.tier,
+    segment: f.segment,
+    segment_label: f.segment_label,
+  };
 }
+
+const LEAD_COLUMNS = `id, type, name, title, company, company_size,
+              qualified_at, result_json, raw_text, linkedin_url, source, source_user_id`;
 
 export function recentLeads(
   db: Database.Database,
@@ -95,23 +181,13 @@ export function recentLeads(
 ): LeadSummary[] {
   const rows = db
     .prepare(
-      `SELECT id, name, title, company, company_size, qualified_at, result_json,
-              raw_text, linkedin_url, source, source_user_id
+      `SELECT ${LEAD_COLUMNS}
        FROM leads
        ORDER BY qualified_at DESC
        LIMIT ?`,
     )
     .all(limit) as LeadRow[];
-  return rows.map(rowToFull).map((f) => ({
-    id: f.id,
-    name: f.name,
-    title: f.title,
-    company: f.company,
-    tier: f.tier,
-    segment: f.segment,
-    segment_label: f.segment_label,
-    qualified_at: f.qualified_at,
-  }));
+  return rows.map(rowToFull).map(fullToSummary);
 }
 
 export function getLeadById(
@@ -120,8 +196,7 @@ export function getLeadById(
 ): LeadFull | null {
   const row = db
     .prepare(
-      `SELECT id, name, title, company, company_size, qualified_at, result_json,
-              raw_text, linkedin_url, source, source_user_id
+      `SELECT ${LEAD_COLUMNS}
        FROM leads WHERE id = ?`,
     )
     .get(id) as LeadRow | undefined;
@@ -179,10 +254,6 @@ export function getDisplayName(
 
 export type Vote = "up" | "down";
 
-// UPSERT: keep one row per (lead_id, user_id). Changing the vote also clears
-// any previous note — a flip 👍→👎 needs a fresh reason; 👎→👍 invalidates the
-// old reason. /feedback only surfaces rows where vote='down', so flipped-up
-// rows are excluded automatically.
 export function upsertFeedback(
   db: Database.Database,
   leadId: number,
@@ -204,8 +275,6 @@ export function upsertFeedback(
   });
 }
 
-// Attaches a note to the current down-vote for (lead_id, user_id). Silent
-// no-op if the row is missing or no longer a down-vote.
 export function setDownvoteNote(
   db: Database.Database,
   leadId: number,
@@ -234,8 +303,11 @@ export function getFeedbackVote(
   return row?.vote ?? null;
 }
 
+// /feedback queue. As of 1.7 it surfaces person and company down-votes —
+// `lead_type` plus the parsed `result` lets the renderer dispatch.
 export interface DownvoteEntry {
   lead_id: number;
+  lead_type: "person" | "company";
   voter_user_id: string;
   voter_display_name: string | null;
   note: string | null;
@@ -243,11 +315,12 @@ export interface DownvoteEntry {
   lead_name: string | null;
   lead_title: string | null;
   lead_company: string | null;
-  result: QualificationResult;
+  result: QualificationResult | CompanyScreenResult;
 }
 
 interface DownvoteRow {
   lead_id: number;
+  lead_type: string | null;
   user_id: string;
   display_name: string | null;
   note: string | null;
@@ -265,6 +338,7 @@ export function recentDownvotes(
   const rows = db
     .prepare(
       `SELECT f.lead_id          AS lead_id,
+              l.type              AS lead_type,
               f.user_id           AS user_id,
               u.display_name      AS display_name,
               f.note              AS note,
@@ -283,6 +357,7 @@ export function recentDownvotes(
     .all(limit) as DownvoteRow[];
   return rows.map((r) => ({
     lead_id: r.lead_id,
+    lead_type: r.lead_type === "company" ? "company" : "person",
     voter_user_id: r.user_id,
     voter_display_name: r.display_name,
     note: r.note,
@@ -290,6 +365,9 @@ export function recentDownvotes(
     lead_name: r.name,
     lead_title: r.title,
     lead_company: r.company,
-    result: JSON.parse(r.result_json) as QualificationResult,
+    result:
+      r.lead_type === "company"
+        ? (JSON.parse(r.result_json) as CompanyScreenResult)
+        : (JSON.parse(r.result_json) as QualificationResult),
   }));
 }

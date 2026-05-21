@@ -24,7 +24,7 @@ Do not invoke for:
 
 Before classifying anything, read `rubric.yaml`. It defines:
 
-- Industries (core / expanded / existing-only / excluded)
+- Industries (core / expanded / excluded)
 - Title scope
 - Geography and company size bounds
 - Segments with IDs and criteria
@@ -168,6 +168,28 @@ Output:
   "signals": []
 }
 ```
+
+## Company screening (1.7)
+
+A second mode operates alongside person qualification: `/company` (or `/co`) followed by 1-10 company names, one per line. Use it to screen which companies fit ICP *before* anyone hunts a specific person at them.
+
+Workflow per name:
+
+1. **Enrich** the company by name (knowledge first; web search as fallback). Same enrichment primitive that person mode uses for missing data.
+2. **Apply company-only rules** — no title check, no `excluded_contacts` check:
+   - Industry confidently in rubric `excluded` bucket → ⛔ NOT
+   - Industry identifiable but not in any rubric bucket (e.g. fintech) → ⛔ NOT
+   - Industry not identifiable even after enrichment → ❓ NEEDS_INFO
+   - Size confidently outside `[min_employees, max_employees]` → ⛔ NOT (high-confidence only — uncertain size never hard-fails, attach `size_unverified`)
+   - Geography confidently non-US → ⛔ NOT (uncertain never fails)
+   - Otherwise → ✅ TARGET
+3. **Map to industry family + primary angle** for TARGETs: take the first segment matching the industry's ID, use its first `default_angles[]`. No person-level segment or title is assigned in company mode.
+
+The payer-diagnostic fence is preserved by data, not code: pharma segments never list `trace_any_denial` or `cms_0057_scorecard` in their `default_angles`, so those diagnostics can only surface for payer/PBM family companies.
+
+The `excluded_contacts` list (people already in pipeline) does **not** apply to company mode — that's a person-name filter, not a company filter.
+
+Output shape (`CompanyScreenResult`) differs from `QualificationResult`: it carries `status` (TARGET/NOT/NEEDS_INFO) instead of `tier`, plus `industry_family`, suggested angle, size + size_confidence, geography, and a 1-2 sentence reason. No segment, no person-level fields.
 
 ## Edge cases
 

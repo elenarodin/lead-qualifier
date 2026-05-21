@@ -4,6 +4,7 @@ import { industryIdsByBucket } from "./rubric.js";
 import type {
   ConfidenceLevel,
   DataSource,
+  EnrichmentResult,
   ProfileData,
   Rubric,
 } from "./types.js";
@@ -11,6 +12,7 @@ import type {
 // Server-side web search tool. Verified at type level — see
 // node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts.
 // max_uses keeps cost bounded; the model decides per call whether to invoke.
+//
 // Haiku 4.5 only supports the "direct" caller form (no programmatic tool
 // calling), so we pin `allowed_callers` explicitly. Without this the API
 // returns 400.
@@ -27,14 +29,10 @@ const VALID_CONFIDENCE: ReadonlySet<ConfidenceLevel> = new Set([
   "low",
 ]);
 
-interface EnrichmentResponse {
-  identified: boolean;
-  industry: string | null;
-  industry_confidence: ConfidenceLevel | null;
-  size: number | null;
-  size_confidence: ConfidenceLevel | null;
-  geography: string | null;
-  source: "knowledge" | "web" | "unknown";
+export interface EnrichCompanyHints {
+  about?: string | null;
+  title?: string | null;
+  geography?: string | null;
 }
 
 function buildSystem(): string {
@@ -74,28 +72,81 @@ Field rules:
 Respond with raw JSON only — no prose, no markdown fences.`;
 }
 
-function buildUserMessage(profile: ProfileData, rubric: Rubric): string {
+function buildUserMessage(
+  company: string,
+  rubric: Rubric,
+  hints: EnrichCompanyHints,
+): string {
   const ids = industryIdsByBucket(rubric);
   const allIds = [...ids.core, ...ids.expanded, ...ids.excluded];
-  const parts = [
-    `Company: ${profile.company ?? "(unknown — cannot enrich without a company name)"}`,
-    `Title (for context): ${profile.title ?? "(unknown)"}`,
-    `Person geography (for context): ${profile.geography ?? "(unknown)"}`,
-    `About / paste excerpt:`,
-    profile.about ?? "(none)",
-    ``,
-    `Rubric industry IDs to prefer when applicable:`,
-    JSON.stringify(allIds),
-  ];
+  const parts = [`Company: ${company}`];
+  if (hints.title) parts.push(`Title (for context): ${hints.title}`);
+  if (hints.geography)
+    parts.push(`Person geography (for context): ${hints.geography}`);
+  if (hints.about) {
+    parts.push(`About / paste excerpt:`);
+    parts.push(hints.about);
+  }
+  parts.push("");
+  parts.push(`Rubric industry IDs to prefer when applicable:`);
+  parts.push(JSON.stringify(allIds));
   return parts.join("\n");
 }
 
-// Pulls the last text block out of the response, accepting any content layout
-// (the API may emit interleaved tool_use / tool_result / text blocks).
-function extractFinalText(content: Anthropic.ContentBlock[]): string | null {
-  for (let i = content.length - 1; i >= 0; i--) {
+// When the model uses server-side tools (web_search), the response is a mix
+// of `server_tool_use`, `web_search_tool_result`, and `text` blocks. The
+// model's actual answer is spread across the text blocks *after* the last
+// tool result — earlier text blocks are "thinking out loud" between searches.
+// We concatenate the answer-phase text and pull a JSON object out of it.
+function extractAnswerText(content: Anthropic.ContentBlock[]): string | null {
+  let lastToolIdx = -1;
+  for (let i = 0; i < content.length; i++) {
+    const t = content[i].type;
+    if (t === "server_tool_use" || t === "web_search_tool_result") {
+      lastToolIdx = i;
+    }
+  }
+  const parts: string[] = [];
+  for (let i = lastToolIdx + 1; i < content.length; i++) {
     const block = content[i];
-    if (block.type === "text") return block.text;
+    if (block.type === "text") parts.push(block.text);
+  }
+  if (parts.length === 0) {
+    // No tools at all (knowledge path) — just concatenate all text blocks.
+    for (const block of content) {
+      if (block.type === "text") parts.push(block.text);
+    }
+  }
+  const joined = parts.join("").trim();
+  return joined.length > 0 ? joined : null;
+}
+
+// Scan a string for the first balanced top-level JSON object and return it.
+// Handles cases where the model wraps JSON in prose or fences without first
+// having to escape them. Returns the raw object substring or null.
+function findFirstJsonObject(text: string): string | null {
+  const start = text.indexOf("{");
+  if (start === -1) return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escape) escape = false;
+      else if (ch === "\\") escape = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
   }
   return null;
 }
@@ -112,12 +163,12 @@ function safeConfidence(v: unknown): ConfidenceLevel | null {
     : null;
 }
 
-function safeSource(v: unknown): EnrichmentResponse["source"] {
+function safeSource(v: unknown): EnrichmentResult["source"] {
   if (v === "knowledge" || v === "web" || v === "unknown") return v;
   return "unknown";
 }
 
-function validate(parsed: unknown): EnrichmentResponse {
+function validate(parsed: unknown): EnrichmentResult {
   if (!parsed || typeof parsed !== "object") {
     throw new SyntaxError("Enrichment output is not an object");
   }
@@ -141,8 +192,8 @@ function validate(parsed: unknown): EnrichmentResponse {
 
 // Map a free-text industry label to a rubric ID when possible (case-insensitive
 // match on either the ID or the label). Unrecognized labels pass through as-is
-// so the classifier can decide what to do with them.
-function normalizeIndustryToRubricId(
+// so callers (classifier, company-mode rules) can decide what to do with them.
+export function normalizeIndustryToRubricId(
   rawIndustry: string,
   rubric: Rubric,
 ): string {
@@ -156,12 +207,26 @@ function normalizeIndustryToRubricId(
   return rawIndustry;
 }
 
-export async function enrichProfile(
-  profile: ProfileData,
+// Underlying primitive: one Haiku call with web_search, returning a structured
+// EnrichmentResult. Used by both person mode (wrapped via enrichProfile) and
+// company mode (called directly with just a name).
+export async function enrichCompany(
+  company: string,
   rubric: Rubric,
-): Promise<ProfileData> {
-  // Nothing to enrich without a company name.
-  if (!profile.company) return profile;
+  hints: EnrichCompanyHints = {},
+): Promise<EnrichmentResult> {
+  const trimmed = company.trim();
+  if (!trimmed) {
+    return {
+      identified: false,
+      industry: null,
+      industry_confidence: null,
+      size: null,
+      size_confidence: null,
+      geography: null,
+      source: "unknown",
+    };
+  }
 
   const anthropic = getAnthropicClient();
   const response = await anthropic.messages.create({
@@ -173,37 +238,105 @@ export async function enrichProfile(
     messages: [
       {
         role: "user",
-        content: buildUserMessage(profile, rubric),
+        content: buildUserMessage(trimmed, rubric, hints),
       },
     ],
   });
 
-  const finalText = extractFinalText(response.content);
+  const finalText = extractAnswerText(response.content);
+  if (process.env.DEBUG_ENRICH === "1") {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[enrich:${trimmed}] stop=${response.stop_reason} blocks=${response.content.map((b) => b.type).join(",")} text=${finalText?.slice(0, 500)}`,
+    );
+  }
   if (!finalText) {
-    // No text block came back — treat as unidentified, leave profile unchanged.
-    return profile;
+    return {
+      identified: false,
+      industry: null,
+      industry_confidence: null,
+      size: null,
+      size_confidence: null,
+      geography: null,
+      source: "unknown",
+    };
   }
 
   let parsed: unknown;
+  // Try the stripped-fence whole-string parse first; fall back to scanning for
+  // an embedded JSON object when the model wraps JSON in prose.
+  const fenceless = stripFences(finalText);
+  const candidate = (() => {
+    try {
+      JSON.parse(fenceless);
+      return fenceless;
+    } catch {
+      return findFirstJsonObject(fenceless);
+    }
+  })();
+  if (!candidate) {
+    return {
+      identified: false,
+      industry: null,
+      industry_confidence: null,
+      size: null,
+      size_confidence: null,
+      geography: null,
+      source: "unknown",
+    };
+  }
   try {
-    parsed = JSON.parse(stripFences(finalText));
+    parsed = JSON.parse(candidate);
   } catch {
-    return profile;
+    return {
+      identified: false,
+      industry: null,
+      industry_confidence: null,
+      size: null,
+      size_confidence: null,
+      geography: null,
+      source: "unknown",
+    };
   }
 
   const enrichment = validate(parsed);
 
-  // Honor the merge rule: only fill fields that the paste left null. Never
-  // overwrite paste-derived data.
+  // Normalize industry to a rubric ID when possible so downstream consumers
+  // can do equality checks against rubric.industries IDs.
+  if (enrichment.industry) {
+    enrichment.industry = normalizeIndustryToRubricId(
+      enrichment.industry,
+      rubric,
+    );
+  }
+
+  return enrichment;
+}
+
+// Person-mode wrapper: enriches a ProfileData, honoring the merge rule — only
+// fill fields the paste left null, never overwrite paste-derived data.
+export async function enrichProfile(
+  profile: ProfileData,
+  rubric: Rubric,
+): Promise<ProfileData> {
+  if (!profile.company) return profile;
+
+  const enrichment = await enrichCompany(profile.company, rubric, {
+    about: profile.about,
+    title: profile.title,
+    geography: profile.geography,
+  });
+
   const out: ProfileData = { ...profile };
-  const enrichSource: DataSource = enrichment.source === "web" ? "web" : "knowledge";
+  const enrichSource: DataSource =
+    enrichment.source === "web" ? "web" : "knowledge";
 
   if (
     out.industry == null &&
     enrichment.identified &&
     enrichment.industry !== null
   ) {
-    out.industry = normalizeIndustryToRubricId(enrichment.industry, rubric);
+    out.industry = enrichment.industry;
     out.industry_source = enrichSource;
     out.industry_confidence = enrichment.industry_confidence;
   }

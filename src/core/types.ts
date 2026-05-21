@@ -72,6 +72,40 @@ export interface QualificationResult {
 }
 
 // ---------------------------------------------------------------------------
+// Company screening (1.7) — output shape for `/company` mode. Distinct from
+// QualificationResult: no person-level tier/segment/angle is assigned; only
+// the industry family and the family's primary angle.
+// ---------------------------------------------------------------------------
+export type CompanyStatus = "TARGET" | "NOT" | "NEEDS_INFO";
+
+export interface CompanyScreenResult {
+  company: string;
+  status: CompanyStatus;
+  industry: string | null;          // rubric industry ID when matched, else free-text label
+  industry_family: string | null;   // rubric industry's human label
+  size: number | null;
+  size_confidence: ConfidenceLevel | null;
+  geography: string | null;
+  angle: string | null;              // rubric opening_angle ID — TARGET only
+  angle_label: string | null;
+  reason: string;                    // 1-2 sentences explaining the status
+  signals: string[];
+}
+
+// Raw output of the enrich step — exported so the company-mode primitive
+// (`enrichCompany`) can return it directly to callers that don't need a
+// ProfileData wrapper.
+export interface EnrichmentResult {
+  identified: boolean;
+  industry: string | null;
+  industry_confidence: ConfidenceLevel | null;
+  size: number | null;
+  size_confidence: ConfidenceLevel | null;
+  geography: string | null;
+  source: "knowledge" | "web" | "unknown";
+}
+
+// ---------------------------------------------------------------------------
 // Rubric — typed shape of rubric.yaml. Only the fields we read are declared.
 // ---------------------------------------------------------------------------
 export interface RubricIndustry {

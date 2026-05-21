@@ -57,6 +57,24 @@ export function findOpeningAngleById(
   return rubric.opening_angles.find((a) => a.id === id) ?? null;
 }
 
+// For company-mode (1.7): given an industry ID, find the first segment whose
+// criteria match that industry and return its first default_angle, plus the
+// angle's human label. Returns null if there's no segment for the industry or
+// if it has no angles configured. This is how company screening picks an
+// opening angle without having a person/title — by data, the rubric's
+// payer-diagnostic fence holds (pharma segments don't list those angles).
+export function primaryAngleForIndustry(
+  rubric: Rubric,
+  industryId: string,
+): { angle: string; label: string } | null {
+  const seg = rubric.segments.find((s) => s.criteria.industry === industryId);
+  if (!seg || seg.default_angles.length === 0) return null;
+  const angleId = seg.default_angles[0];
+  const angle = rubric.opening_angles.find((a) => a.id === angleId);
+  if (!angle) return null;
+  return { angle: angleId, label: angle.label };
+}
+
 // All industry IDs grouped by bucket — useful for the classifier prompt.
 export function industryIdsByBucket(rubric: Rubric): {
   core: string[];

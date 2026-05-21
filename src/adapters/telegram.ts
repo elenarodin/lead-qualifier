@@ -3,8 +3,15 @@ import { Markup, Telegraf } from "telegraf";
 import { message } from "telegraf/filters";
 import type { InlineKeyboardMarkup } from "telegraf/types";
 import type { AppConfig } from "../config.js";
+import { MAX_BATCH, screenCompanies } from "../core/company.js";
 import { qualifyLead, TooShortError } from "../core/qualify.js";
-import type { ProfileData, QualificationResult, Tier } from "../core/types.js";
+import type {
+  CompanyScreenResult,
+  CompanyStatus,
+  ProfileData,
+  QualificationResult,
+  Tier,
+} from "../core/types.js";
 import {
   getFeedbackVote,
   getLeadById,
@@ -26,6 +33,12 @@ const TIER_EMOJI: Record<Tier, string> = {
   WARM: "🌤",
   COLD: "❄️",
   DISQUALIFIED: "⛔️",
+};
+
+const COMPANY_STATUS_EMOJI: Record<CompanyStatus, string> = {
+  TARGET: "✅",
+  NOT: "⛔",
+  NEEDS_INFO: "❓",
 };
 
 const LINKEDIN_URL_RE = /https?:\/\/(?:[a-z]{2,3}\.)?linkedin\.com\/\S+/i;
@@ -60,6 +73,7 @@ function startMessage(): string {
 Paste a LinkedIn profile and I'll classify it against the Kombocode ICP\\. *One profile per message* — I treat each paste independently and don't merge multiple roles\\.
 
 Commands:
+/company \\(or /co\\) — screen 1\\-10 companies for ICP fit, one name per line
 /recent \\[n\\] — last n qualifications
 /why \\<id\\> — full rationale for that lead
 /feedback \\[n\\] — recent down\\-votes \\(tuning queue\\)
@@ -71,13 +85,15 @@ _v${escapeMd(VERSION)}_`;
 
 const HELP_MESSAGE = `Commands:
 /start — intro
+/company \\(or /co\\) — screen 1\\-10 companies for ICP fit \\(one name per line\\)
 /recent \\[n\\] — last n qualifications \\(default 5\\)
 /why \\<id\\> — decision rationale \\+ signals
 /feedback \\[n\\] — recent down\\-votes with notes
 /version — current build
 /help — this menu
 
-Paste *one profile per message* \\(\\~200\\+ chars\\) and I'll qualify it\\. Multiple roles? Send them as separate pastes\\. Each card has 👍 / 👎 buttons — tap to record feedback\\.`;
+Paste *one profile per message* \\(\\~200\\+ chars\\) and I'll qualify it as a person\\. Each card has 👍 / 👎 buttons — tap to record feedback\\.
+Use /company to screen companies first \\(no people needed\\) and qualify a person at the targets afterward\\.`;
 
 const WELCOME_MESSAGE = `✅ You're in\\.
 
@@ -225,7 +241,13 @@ function formatCard(
 function formatRecent(rows: LeadSummary[]): string {
   if (rows.length === 0) return "No qualifications yet\\.";
   const formatted = rows.map((r) => {
-    const emoji = r.tier ? (TIER_EMOJI[r.tier as Tier] ?? "•") : "❓";
+    if (r.type === "company") {
+      const emoji = COMPANY_STATUS_EMOJI[r.status];
+      const co = r.company ?? "Unknown company";
+      const family = r.industry_family ?? "—";
+      return `\`${r.id}\` ${emoji} ${escapeMd(co)} \\(${escapeMd(family)}\\)`;
+    }
+    const emoji = r.tier ? (TIER_EMOJI[r.tier] ?? "•") : "❓";
     const who = r.name ?? "Unknown";
     const where = r.company ? ` @ ${r.company}` : "";
     const seg = r.segment_label ?? r.segment ?? "—";
@@ -234,9 +256,8 @@ function formatRecent(rows: LeadSummary[]): string {
   return formatted.join("\n");
 }
 
-function formatWhy(id: number, result: QualificationResult): string {
+function formatWhyPerson(id: number, result: QualificationResult): string {
   const lines: string[] = [];
-  // NEEDS_INFO leads have no tier; render with the ❓ header for clarity.
   if (result.qualified === "NEEDS_INFO") {
     lines.push(`❓ *NEED MORE INFO* — ID ${id}`);
   } else {
@@ -256,20 +277,137 @@ function formatWhy(id: number, result: QualificationResult): string {
   return lines.join("\n");
 }
 
+function formatWhyCompany(id: number, result: CompanyScreenResult): string {
+  const lines: string[] = [];
+  const emoji = COMPANY_STATUS_EMOJI[result.status];
+  lines.push(
+    `${emoji} *${escapeMd(result.status)}* — ${escapeMd(result.company)} \\(ID ${id}\\)`,
+  );
+  lines.push("");
+  if (result.industry || result.industry_family) {
+    const label = result.industry_family ?? result.industry ?? "—";
+    const enrichSrc = result.signals.includes("industry_via_web")
+      ? " \\(via web\\)"
+      : "";
+    lines.push(`*Industry:* ${escapeMd(label)}${enrichSrc}`);
+  }
+  if (result.size !== null || result.size_confidence) {
+    const sizeText = result.size !== null ? `~${result.size} emp` : "unknown";
+    const conf = result.size_confidence
+      ? ` \\(${escapeMd(result.size_confidence)} conf\\)`
+      : "";
+    lines.push(`*Size:* ${escapeMd(sizeText)}${conf}`);
+  }
+  if (result.geography) {
+    lines.push(`*Geography:* ${escapeMd(result.geography)}`);
+  }
+  if (result.angle_label) {
+    lines.push(`*Suggested angle:* ${escapeMd(result.angle_label)}`);
+  }
+  lines.push("");
+  lines.push(`*Reason:*`);
+  lines.push(`_${escapeMd(result.reason)}_`);
+  if (result.signals.length > 0) {
+    lines.push("");
+    lines.push(`*Signals:*`);
+    lines.push(result.signals.map((s) => `• ${escapeMd(s)}`).join("\n"));
+  }
+  return lines.join("\n");
+}
+
+// One-line per-company row in the /company batch summary. Mirrors the prompt's
+// example layout: "1. ✅ Company · Family · ~180 emp → Angle   (id 20)".
+function formatCompanyLine(
+  index: number,
+  id: number,
+  result: CompanyScreenResult,
+): string {
+  const emoji = COMPANY_STATUS_EMOJI[result.status];
+  const co = escapeMd(result.company);
+  const idTag = ` \\(id ${id}\\)`;
+
+  if (result.status === "NOT") {
+    const why = escapeMd(result.reason);
+    return `${index}\\. ${emoji} *${co}* — ${why}${idTag}`;
+  }
+  if (result.status === "NEEDS_INFO") {
+    return `${index}\\. ${emoji} *${co}* — couldn't identify${idTag}`;
+  }
+  // TARGET
+  const family = result.industry_family
+    ? ` · ${escapeMd(result.industry_family)}`
+    : "";
+  let sizeBit = "";
+  if (result.size !== null) {
+    const verifyTag = result.size_confidence !== "high" ? " ⚠️ verify" : "";
+    sizeBit = ` · ~${result.size} emp${verifyTag}`;
+  } else if (result.signals.includes("size_unverified")) {
+    sizeBit = " · size unverified";
+  }
+  const angle = result.angle_label
+    ? ` → ${escapeMd(result.angle_label)}`
+    : "";
+  return `${index}\\. ${emoji} *${co}*${family}${sizeBit}${angle}${idTag}`;
+}
+
+function formatCompanySummary(
+  inserted: { id: number; result: CompanyScreenResult }[],
+  skipped: string[],
+): string {
+  const counts: Record<CompanyStatus, number> = {
+    TARGET: 0,
+    NOT: 0,
+    NEEDS_INFO: 0,
+  };
+  for (const { result } of inserted) counts[result.status]++;
+
+  const header = `Screened ${inserted.length} ${inserted.length === 1 ? "company" : "companies"} — ${counts.TARGET} ✅ target${counts.TARGET === 1 ? "" : "s"}, ${counts.NOT} ⛔ out, ${counts.NEEDS_INFO} ❓ unknown`;
+
+  const lines = inserted.map((entry, i) =>
+    formatCompanyLine(i + 1, entry.id, entry.result),
+  );
+
+  const out: string[] = [];
+  out.push(header); // pure ASCII + emoji + em dashes — no MD-V2 specials
+  out.push("");
+  out.push(...lines);
+  if (skipped.length > 0) {
+    out.push("");
+    out.push(
+      `_Skipped \\(${skipped.length} over the ${MAX_BATCH}\\-cap\\):_ ${skipped.map(escapeMd).join(", ")}`,
+    );
+  }
+  out.push("");
+  out.push(`/why \\<id\\> to expand · /feedback to flag`);
+  return out.join("\n");
+}
+
 function formatFeedbackQueue(rows: DownvoteEntry[]): string {
   if (rows.length === 0) return "No down\\-votes yet\\.";
   return rows
     .map((r) => {
-      const who = r.lead_name ?? "Unknown";
-      const title = r.lead_title ?? "—";
-      const company = r.lead_company ?? "—";
-      const tier = r.result.tier ?? "—";
-      const seg = r.result.segment_label ?? r.result.segment ?? "—";
-      const angle = r.result.opening_angle_label ?? "—";
       const voter = r.voter_display_name ?? r.voter_user_id;
       const noteLine = r.note
         ? `_"${escapeMd(r.note)}"_`
         : `_\\(no reason given\\)_`;
+      if (r.lead_type === "company") {
+        const result = r.result as CompanyScreenResult;
+        const co = r.lead_company ?? result.company ?? "Unknown";
+        const family = result.industry_family ?? "—";
+        const angle = result.angle_label ?? "—";
+        return [
+          `\`${r.lead_id}\` 👎 *${escapeMd(co)}* — company`,
+          `${escapeMd(result.status)} \\· ${escapeMd(family)} \\· ${escapeMd(angle)}`,
+          `by ${escapeMd(voter)}: ${noteLine}`,
+        ].join("\n");
+      }
+      const result = r.result as QualificationResult;
+      const who = r.lead_name ?? "Unknown";
+      const title = r.lead_title ?? "—";
+      const company = r.lead_company ?? "—";
+      const tier = result.tier ?? "—";
+      const seg = result.segment_label ?? result.segment ?? "—";
+      const angle = result.opening_angle_label ?? "—";
       return [
         `\`${r.lead_id}\` 👎 *${escapeMd(who)}* — ${escapeMd(`${title} @ ${company}`)}`,
         `${escapeMd(tier)} \\· ${escapeMd(seg)} \\· ${escapeMd(angle)}`,
@@ -377,7 +515,86 @@ export function buildBot(config: AppConfig, db: Database.Database): Telegraf {
       });
       return;
     }
-    await ctx.reply(formatWhy(id, lead.result), { parse_mode: "MarkdownV2" });
+    const text =
+      lead.type === "company"
+        ? formatWhyCompany(id, lead.result)
+        : formatWhyPerson(id, lead.result);
+    // Company /why cards carry feedback buttons too — same flow as person cards.
+    const userId = String(ctx.from.id);
+    const currentVote = getFeedbackVote(db, id, userId);
+    const keyboard = feedbackButtons(id, currentVote);
+    await ctx.reply(text, {
+      parse_mode: "MarkdownV2",
+      reply_markup: keyboard.reply_markup as InlineKeyboardMarkup,
+    });
+  });
+
+  bot.command(["company", "co"], async (ctx) => {
+    const userId = String(ctx.from.id);
+    // Strip the leading command (and optional @botname suffix) plus the first
+    // separator. Whatever remains is the (possibly multi-line) name list.
+    const stripped = ctx.message.text.replace(
+      /^\/(?:company|co)(?:@\w+)?\s*/i,
+      "",
+    );
+    const names = stripped
+      .split(/\r?\n/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    if (names.length === 0) {
+      await ctx.reply(
+        "Usage: /company (or /co)\n<one company name per line, up to 10>",
+      );
+      return;
+    }
+
+    const toScreen = names.slice(0, MAX_BATCH);
+    const overflow = names.slice(MAX_BATCH);
+    const ack = await ctx.reply(
+      `🔍 Screening ${toScreen.length} compan${toScreen.length === 1 ? "y" : "ies"}…`,
+    );
+
+    let screenOutput: Awaited<ReturnType<typeof screenCompanies>>;
+    try {
+      screenOutput = await screenCompanies(toScreen);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[/company] error:", err);
+      await ctx.telegram.editMessageText(
+        ack.chat.id,
+        ack.message_id,
+        undefined,
+        ERROR_REPLY,
+      );
+      return;
+    }
+
+    // Insert one lead row per result, capture the assigned IDs.
+    const inserted = screenOutput.results.map((result) => {
+      const id = insertLead(db, {
+        type: "company",
+        raw_text: result.company,
+        linkedin_url: null,
+        name: null,
+        title: null,
+        company: result.company,
+        company_size: result.size,
+        result,
+        source: "telegram",
+        source_user_id: userId,
+      });
+      return { id, result };
+    });
+
+    const summary = formatCompanySummary(inserted, overflow);
+    await ctx.telegram.editMessageText(
+      ack.chat.id,
+      ack.message_id,
+      undefined,
+      summary,
+      { parse_mode: "MarkdownV2" },
+    );
   });
 
   bot.command("feedback", async (ctx) => {
@@ -497,9 +714,13 @@ export function buildBot(config: AppConfig, db: Database.Database): Telegraf {
       });
 
       const id = insertLead(db, {
+        type: "person",
         raw_text: text,
         linkedin_url,
-        profile,
+        name: profile.name,
+        title: profile.title,
+        company: profile.company,
+        company_size: profile.company_size,
         result,
         source: "telegram",
         source_user_id: userId,
