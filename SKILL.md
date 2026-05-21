@@ -169,6 +169,32 @@ Output:
 }
 ```
 
+## Company resolution and ambiguity (1.8)
+
+A bare company name is often ambiguous (two distinct companies can share a name) and Claude's training-time knowledge of "Foo Inc" may be stale or wrong. Resolution follows a three-tier hierarchy:
+
+1. **Domain** (strongest). When a domain is supplied (e.g. `Quadax, quadax.com` or `quadax.com`), web search is restricted to that domain via the tool's `allowed_domains` parameter. The model reads the company's own pages and can't be misled by a similarly-named entity. `resolved_via = "domain"`, `match_confidence = "high"`.
+2. **LinkedIn slug**. A `linkedin.com/company/<slug>` URL uses the slug as an entity anchor in a broad web search. LinkedIn pages themselves are not scraped. `resolved_via = "linkedin"`.
+3. **Bare name**. The model resolves by name using its knowledge + web search. If two or more distinct companies plausibly share the name, it returns multiple `candidates` and the outcome is **AMBIGUOUS** — no segment, no angle, no silent pick. The user is asked to retry with a domain.
+
+Every result carries a **resolution echo**: `resolved_domain` + `sub_industry`. The user can spot a mis-resolution at a glance. This applies to TARGET, NOT, and the person-mode company line.
+
+### family vs sub_industry
+
+- `industry` / `industry_family` is the **rubric routing bucket** — Payer Tech, Health IT Infrastructure, Clinical Trial Tech, etc. Drives segment assignment and the suggested angle.
+- `sub_industry` is the **granular truth** — what the company actually does. "AI-driven prior auth and payment integrity platform", "RWD/RWE analytics for life sciences", "EDI clearinghouse services". This is shown alongside the family on every card.
+
+When family and sub_industry seem to disagree (e.g. family "Payer Tech" but sub_industry "consumer wellness app"), that's deliberate signal — the user should flag it with 👎.
+
+### Outcomes (company mode)
+
+- **TARGET** (✅) — confidently in a rubric industry, size OK or unverified, US (or unknown).
+- **NOT** (⛔) — confidently in `excluded` bucket OR off-ICP industry OR high-confidence out-of-band size OR confidently non-US.
+- **NEEDS_INFO** (❓) — couldn't identify the company at all, even after enrichment.
+- **AMBIGUOUS** (❓) — bare name with 2+ plausible distinct matches. Carries a `candidates` list and a retry hint with the suggested `/company Name, domain` form. **Never DISQUALIFIED.**
+
+The `excluded_contacts` list (people in pipeline) is person-only — company screening doesn't consult it.
+
 ## Company screening (1.7)
 
 A second mode operates alongside person qualification: `/company` (or `/co`) followed by 1-10 company names, one per line. Use it to screen which companies fit ICP *before* anyone hunts a specific person at them.

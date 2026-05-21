@@ -37,6 +37,7 @@ function disqualifyResult(args: {
   segment?: string | null;
   segment_label?: string | null;
   signals?: string[];
+  sub_industry?: string | null;
 }): QualificationResult {
   return {
     qualified: "FAIL",
@@ -49,6 +50,7 @@ function disqualifyResult(args: {
     disqualifier: args.disqualifier,
     decision_rationale: args.decision_rationale,
     signals: args.signals ?? [],
+    sub_industry: args.sub_industry ?? null,
   };
 }
 
@@ -72,11 +74,13 @@ function needsInfoResult(
       ...extraSignals,
       ...profile.signals,
     ]),
+    sub_industry: profile.sub_industry,
   };
 }
 
 function mergeClassifier(
   c: ClassifierOutput,
+  profile: ProfileData,
   extraSignals: string[],
 ): QualificationResult {
   const isDQ = c.tier === "DISQUALIFIED";
@@ -91,6 +95,7 @@ function mergeClassifier(
     disqualifier: isDQ ? c.decision_rationale : null,
     decision_rationale: c.decision_rationale,
     signals: dedupe([...c.signals, ...extraSignals]),
+    sub_industry: profile.sub_industry,
   };
 }
 
@@ -140,6 +145,7 @@ export async function qualifyLead(
         notes: rules.disqualifier,
         decision_rationale: `Hard rule violation: ${rules.disqualifier}.`,
         signals: dedupe([...orchSignals, ...profile.signals]),
+        sub_industry: profile.sub_industry,
       }),
     };
   }
@@ -157,6 +163,9 @@ export async function qualifyLead(
   const classified = await classifyLead(profile, rubric);
   return {
     profile,
-    result: mergeClassifier(classified, [...rules.signals, ...orchSignals]),
+    result: mergeClassifier(classified, profile, [
+      ...rules.signals,
+      ...orchSignals,
+    ]),
   };
 }

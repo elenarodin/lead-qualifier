@@ -3,7 +3,11 @@ import { Markup, Telegraf } from "telegraf";
 import { message } from "telegraf/filters";
 import type { InlineKeyboardMarkup } from "telegraf/types";
 import type { AppConfig } from "../config.js";
-import { MAX_BATCH, screenCompanies } from "../core/company.js";
+import {
+  MAX_BATCH,
+  parseCompanyLine,
+  screenCompanies,
+} from "../core/company.js";
 import { qualifyLead, TooShortError } from "../core/qualify.js";
 import type {
   CompanyScreenResult,
@@ -39,6 +43,7 @@ const COMPANY_STATUS_EMOJI: Record<CompanyStatus, string> = {
   TARGET: "✅",
   NOT: "⛔",
   NEEDS_INFO: "❓",
+  AMBIGUOUS: "❓",
 };
 
 const LINKEDIN_URL_RE = /https?:\/\/(?:[a-z]{2,3}\.)?linkedin\.com\/\S+/i;
@@ -74,6 +79,7 @@ Paste a LinkedIn profile and I'll classify it against the Kombocode ICP\\. *One 
 
 Commands:
 /company \\(or /co\\) — screen 1\\-10 companies for ICP fit, one name per line
+   tip: add a domain for the most accurate result — \`/company Quadax, quadax\\.com\`
 /recent \\[n\\] — last n qualifications
 /why \\<id\\> — full rationale for that lead
 /feedback \\[n\\] — recent down\\-votes \\(tuning queue\\)
@@ -93,7 +99,15 @@ const HELP_MESSAGE = `Commands:
 /help — this menu
 
 Paste *one profile per message* \\(\\~200\\+ chars\\) and I'll qualify it as a person\\. Each card has 👍 / 👎 buttons — tap to record feedback\\.
-Use /company to screen companies first \\(no people needed\\) and qualify a person at the targets afterward\\.`;
+
+For company screening, add a domain or LinkedIn URL on the same line as the name for the most accurate result:
+\`\`\`
+/company
+Quadax, quadax\\.com
+linkedin\\.com/company/datavant
+Welkin Health
+\`\`\`
+Bare names work but may surface as AMBIGUOUS when multiple companies share a name\\.`;
 
 const WELCOME_MESSAGE = `✅ You're in\\.
 
@@ -210,6 +224,13 @@ function formatCard(
   const header = formatHeaderLine(profile, result);
   if (header) {
     lines.push(header);
+    // 1.8: surface the granular sub-industry directly under the company line.
+    if (result.sub_industry) {
+      lines.push(`  ↳ ${escapeMd(result.sub_industry)}`);
+    }
+    lines.push("");
+  } else if (result.sub_industry) {
+    lines.push(`  ↳ ${escapeMd(result.sub_industry)}`);
     lines.push("");
   }
 
@@ -284,12 +305,26 @@ function formatWhyCompany(id: number, result: CompanyScreenResult): string {
     `${emoji} *${escapeMd(result.status)}* — ${escapeMd(result.company)} \\(ID ${id}\\)`,
   );
   lines.push("");
-  if (result.industry || result.industry_family) {
-    const label = result.industry_family ?? result.industry ?? "—";
+
+  // 1.8: resolution echo — what entity we actually matched.
+  if (result.resolved_domain || result.resolved_via) {
+    const domBit = result.resolved_domain
+      ? escapeMd(result.resolved_domain)
+      : "—";
+    const viaBit = result.resolved_via ? escapeMd(result.resolved_via) : "—";
+    const confBit = result.match_confidence
+      ? `, ${escapeMd(result.match_confidence)} conf`
+      : "";
+    lines.push(`*Resolved:* ${domBit} \\(via ${viaBit}${confBit}\\)`);
+  }
+  if (result.sub_industry) {
+    lines.push(`*Sub\\-industry:* ${escapeMd(result.sub_industry)}`);
+  }
+  if (result.industry_family) {
     const enrichSrc = result.signals.includes("industry_via_web")
       ? " \\(via web\\)"
       : "";
-    lines.push(`*Industry:* ${escapeMd(label)}${enrichSrc}`);
+    lines.push(`*Family:* ${escapeMd(result.industry_family)}${enrichSrc}`);
   }
   if (result.size !== null || result.size_confidence) {
     const sizeText = result.size !== null ? `~${result.size} emp` : "unknown";
@@ -304,6 +339,19 @@ function formatWhyCompany(id: number, result: CompanyScreenResult): string {
   if (result.angle_label) {
     lines.push(`*Suggested angle:* ${escapeMd(result.angle_label)}`);
   }
+
+  // AMBIGUOUS: enumerate candidates explicitly.
+  if (result.status === "AMBIGUOUS" && result.candidates.length > 0) {
+    lines.push("");
+    lines.push(`*Candidates:*`);
+    result.candidates.slice(0, 3).forEach((c, i) => {
+      const letter = String.fromCharCode("a".charCodeAt(0) + i);
+      const dom = c.domain ? escapeMd(c.domain) : "no domain";
+      const desc = escapeMd(c.description || "unknown");
+      lines.push(`  ${letter}\\) ${dom} — ${desc}`);
+    });
+  }
+
   lines.push("");
   lines.push(`*Reason:*`);
   lines.push(`_${escapeMd(result.reason)}_`);
@@ -315,8 +363,17 @@ function formatWhyCompany(id: number, result: CompanyScreenResult): string {
   return lines.join("\n");
 }
 
-// One-line per-company row in the /company batch summary. Mirrors the prompt's
-// example layout: "1. ✅ Company · Family · ~180 emp → Angle   (id 20)".
+// Compact resolution echo: "(domain · sub_industry)" or just one if the other
+// is missing. Returns empty string when neither is available.
+function resolutionEchoSuffix(result: CompanyScreenResult): string {
+  const parts: string[] = [];
+  if (result.resolved_domain) parts.push(escapeMd(result.resolved_domain));
+  if (result.sub_industry) parts.push(escapeMd(result.sub_industry));
+  return parts.length > 0 ? ` \\(${parts.join(" · ")}\\)` : "";
+}
+
+// Per-company entry in the /company batch summary. Multi-line for TARGET and
+// AMBIGUOUS; single-line for NOT and NEEDS_INFO.
 function formatCompanyLine(
   index: number,
   id: number,
@@ -326,28 +383,50 @@ function formatCompanyLine(
   const co = escapeMd(result.company);
   const idTag = ` \\(id ${id}\\)`;
 
-  if (result.status === "NOT") {
-    const why = escapeMd(result.reason);
-    return `${index}\\. ${emoji} *${co}* — ${why}${idTag}`;
+  if (result.status === "AMBIGUOUS") {
+    const head = `${index}\\. ${emoji} *${co}* — ambiguous, which one?${idTag}`;
+    const candidates = result.candidates.slice(0, 3).map((c, i) => {
+      const letter = String.fromCharCode("a".charCodeAt(0) + i);
+      const dom = c.domain ? escapeMd(c.domain) : "no domain";
+      const desc = escapeMd(c.description || "unknown");
+      return `   ${letter}\\) ${dom} — ${desc}`;
+    });
+    const firstDomain =
+      result.candidates.find((c) => c.domain)?.domain ?? "domain.com";
+    const retry = `   Reply: \`/company ${escapeMd(result.company)}, ${escapeMd(firstDomain)}\``;
+    return [head, ...candidates, retry].join("\n");
   }
+
+  if (result.status === "NOT") {
+    const echo = resolutionEchoSuffix(result);
+    const why = escapeMd(result.reason);
+    return `${index}\\. ${emoji} *${co}*${echo} — ${why}${idTag}`;
+  }
+
   if (result.status === "NEEDS_INFO") {
     return `${index}\\. ${emoji} *${co}* — couldn't identify${idTag}`;
   }
-  // TARGET
-  const family = result.industry_family
-    ? ` · ${escapeMd(result.industry_family)}`
-    : "";
-  let sizeBit = "";
+
+  // TARGET — two-line: company + resolution echo, then routing details.
+  const echo = resolutionEchoSuffix(result);
+  const head = `${index}\\. ${emoji} *${co}*${echo}`;
+
+  const detailParts: string[] = [];
+  if (result.industry_family) {
+    detailParts.push(escapeMd(result.industry_family));
+  }
   if (result.size !== null) {
     const verifyTag = result.size_confidence !== "high" ? " ⚠️ verify" : "";
-    sizeBit = ` · ~${result.size} emp${verifyTag}`;
+    detailParts.push(`~${result.size} emp${verifyTag}`);
   } else if (result.signals.includes("size_unverified")) {
-    sizeBit = " · size unverified";
+    detailParts.push("size unverified");
   }
-  const angle = result.angle_label
+  const angleTail = result.angle_label
     ? ` → ${escapeMd(result.angle_label)}`
     : "";
-  return `${index}\\. ${emoji} *${co}*${family}${sizeBit}${angle}${idTag}`;
+  const detail = `   · ${detailParts.join(" · ")}${angleTail}${idTag}`;
+
+  return `${head}\n${detail}`;
 }
 
 function formatCompanySummary(
@@ -358,10 +437,18 @@ function formatCompanySummary(
     TARGET: 0,
     NOT: 0,
     NEEDS_INFO: 0,
+    AMBIGUOUS: 0,
   };
   for (const { result } of inserted) counts[result.status]++;
 
-  const header = `Screened ${inserted.length} ${inserted.length === 1 ? "company" : "companies"} — ${counts.TARGET} ✅ target${counts.TARGET === 1 ? "" : "s"}, ${counts.NOT} ⛔ out, ${counts.NEEDS_INFO} ❓ unknown`;
+  const headerParts: string[] = [
+    `${counts.TARGET} ✅ target${counts.TARGET === 1 ? "" : "s"}`,
+    `${counts.NOT} ⛔ out`,
+  ];
+  if (counts.AMBIGUOUS > 0) headerParts.push(`${counts.AMBIGUOUS} ❓ ambiguous`);
+  if (counts.NEEDS_INFO > 0)
+    headerParts.push(`${counts.NEEDS_INFO} ❓ unknown`);
+  const header = `Screened ${inserted.length} ${inserted.length === 1 ? "company" : "companies"} — ${headerParts.join(", ")}`;
 
   const lines = inserted.map((entry, i) =>
     formatCompanyLine(i + 1, entry.id, entry.result),
@@ -519,13 +606,21 @@ export function buildBot(config: AppConfig, db: Database.Database): Telegraf {
       lead.type === "company"
         ? formatWhyCompany(id, lead.result)
         : formatWhyPerson(id, lead.result);
-    // Company /why cards carry feedback buttons too — same flow as person cards.
+    // Buttons are attached on TARGET/NOT and on every person tier; suppressed
+    // for AMBIGUOUS and NEEDS_INFO (no tier/status to validate, retry instead).
+    const wantsButtons =
+      lead.type === "company"
+        ? lead.result.status !== "AMBIGUOUS" &&
+          lead.result.status !== "NEEDS_INFO"
+        : lead.result.qualified !== "NEEDS_INFO";
     const userId = String(ctx.from.id);
-    const currentVote = getFeedbackVote(db, id, userId);
-    const keyboard = feedbackButtons(id, currentVote);
+    const currentVote = wantsButtons ? getFeedbackVote(db, id, userId) : null;
+    const replyMarkup = wantsButtons
+      ? (feedbackButtons(id, currentVote).reply_markup as InlineKeyboardMarkup)
+      : undefined;
     await ctx.reply(text, {
       parse_mode: "MarkdownV2",
-      reply_markup: keyboard.reply_markup as InlineKeyboardMarkup,
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {}),
     });
   });
 
@@ -549,15 +644,16 @@ export function buildBot(config: AppConfig, db: Database.Database): Telegraf {
       return;
     }
 
-    const toScreen = names.slice(0, MAX_BATCH);
+    const identifiers = names.map((line) => parseCompanyLine(line));
+    const toScreenLines = names.slice(0, MAX_BATCH);
     const overflow = names.slice(MAX_BATCH);
     const ack = await ctx.reply(
-      `🔍 Screening ${toScreen.length} compan${toScreen.length === 1 ? "y" : "ies"}…`,
+      `🔍 Screening ${toScreenLines.length} compan${toScreenLines.length === 1 ? "y" : "ies"}…`,
     );
 
     let screenOutput: Awaited<ReturnType<typeof screenCompanies>>;
     try {
-      screenOutput = await screenCompanies(toScreen);
+      screenOutput = await screenCompanies(identifiers, names);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error("[/company] error:", err);

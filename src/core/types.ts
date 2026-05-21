@@ -8,6 +8,27 @@ export type ConfidenceLevel = "high" | "medium" | "low";
 export type DataSource = "paste" | "knowledge" | "web" | "unknown";
 
 // ---------------------------------------------------------------------------
+// Resolution (1.8) — how we identified the company.
+// `domain` anchor is strongest (web search restricted to the domain), then
+// `linkedin` slug, then bare `name`. `match_confidence` is the model's own
+// take on how sure it is. When a bare name plausibly matches >=2 distinct
+// companies the model populates `candidates` and we treat it as AMBIGUOUS.
+// ---------------------------------------------------------------------------
+export type ResolvedVia = "domain" | "linkedin" | "name";
+export type MatchConfidence = "high" | "medium" | "low";
+
+export interface ResolutionCandidate {
+  domain: string | null;
+  description: string;
+}
+
+export interface CompanyIdentifier {
+  name: string | null;
+  domain: string | null;
+  linkedin_slug: string | null;
+}
+
+// ---------------------------------------------------------------------------
 // Profile data — extracted from raw paste text by Stage 1 (extract.ts) and
 // optionally filled in by Stage 1b (enrich.ts) when industry/size are missing.
 // ---------------------------------------------------------------------------
@@ -15,6 +36,7 @@ export interface ProfileData {
   name: string | null;
   title: string | null;
   company: string | null;
+  company_domain: string | null; // 1.8 — optional anchor for enrichment
   company_size: number | null;
   size_source: DataSource;
   size_confidence: ConfidenceLevel | null;
@@ -22,6 +44,7 @@ export interface ProfileData {
   industry: string | null; // rubric industry ID when matched, else free-text label
   industry_source: DataSource;
   industry_confidence: ConfidenceLevel | null;
+  sub_industry: string | null; // 1.8 — granular descriptor (e.g. "prior-auth automation")
   about: string | null;
   signals: string[];
 }
@@ -57,6 +80,8 @@ export interface ClassifierOutput {
 // outcomes carry no tier (we couldn't identify the company well enough to
 // place one). `qualified === "NEEDS_INFO"` is the canonical check; tier-null
 // without NEEDS_INFO is never produced by the pipeline.
+// 1.8 adds `sub_industry` — granular descriptor of what the company does,
+// distinct from the rubric family/segment.
 // ---------------------------------------------------------------------------
 export interface QualificationResult {
   qualified: Qualified;
@@ -69,20 +94,23 @@ export interface QualificationResult {
   disqualifier: string | null;
   decision_rationale: string;
   signals: string[];
+  sub_industry: string | null;
 }
 
 // ---------------------------------------------------------------------------
 // Company screening (1.7) — output shape for `/company` mode. Distinct from
 // QualificationResult: no person-level tier/segment/angle is assigned; only
-// the industry family and the family's primary angle.
+// the industry family and the family's primary angle. 1.8 adds resolution
+// metadata, sub_industry, AMBIGUOUS status, and a candidates list.
 // ---------------------------------------------------------------------------
-export type CompanyStatus = "TARGET" | "NOT" | "NEEDS_INFO";
+export type CompanyStatus = "TARGET" | "NOT" | "NEEDS_INFO" | "AMBIGUOUS";
 
 export interface CompanyScreenResult {
   company: string;
   status: CompanyStatus;
   industry: string | null;          // rubric industry ID when matched, else free-text label
   industry_family: string | null;   // rubric industry's human label
+  sub_industry: string | null;      // 1.8 — granular descriptor
   size: number | null;
   size_confidence: ConfidenceLevel | null;
   geography: string | null;
@@ -90,19 +118,30 @@ export interface CompanyScreenResult {
   angle_label: string | null;
   reason: string;                    // 1-2 sentences explaining the status
   signals: string[];
+  // 1.8 — resolution echo
+  resolved_domain: string | null;
+  resolved_via: ResolvedVia | null;
+  match_confidence: MatchConfidence | null;
+  candidates: ResolutionCandidate[]; // populated only when status === "AMBIGUOUS"
 }
 
 // Raw output of the enrich step — exported so the company-mode primitive
 // (`enrichCompany`) can return it directly to callers that don't need a
-// ProfileData wrapper.
+// ProfileData wrapper. 1.8 adds resolution metadata, sub_industry, and a
+// candidates list for ambiguous bare-name lookups.
 export interface EnrichmentResult {
   identified: boolean;
   industry: string | null;
   industry_confidence: ConfidenceLevel | null;
+  sub_industry: string | null;
   size: number | null;
   size_confidence: ConfidenceLevel | null;
   geography: string | null;
   source: "knowledge" | "web" | "unknown";
+  resolved_domain: string | null;
+  resolved_via: ResolvedVia;
+  match_confidence: MatchConfidence | null;
+  candidates: ResolutionCandidate[];
 }
 
 // ---------------------------------------------------------------------------
